@@ -115,4 +115,4 @@ Full results are saved to `mdc_report.json` in the working directory. This file 
 
 ## Author
 
-Built by [@YOUR_GITHUB_USERNAME](https://github.com/ArtistYay) as part of an Azure security accelerator for Microsoft Defender for Cloud assessment and remediation workflows.
+Built by [ArtistYay](https://github.com/ArtistYay) as part of an Azure security accelerator for Microsoft Defender for Cloud assessment and remediation workflows.
