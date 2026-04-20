@@ -47,6 +47,7 @@ def suppress_stderr():
 from azure.identity import InteractiveBrowserCredential
 from azure.mgmt.security import SecurityCenter
 from azure.mgmt.subscription import SubscriptionClient
+from cis_mapping import enrich_recommendations, get_section_summary
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -245,6 +246,9 @@ def assess_recommendations(client, limit=20):
     ]
     recs.sort(key=lambda r: (severity_order.get(r["severity"], 99), r["name"]))
 
+    # Enrich with CIS Azure Foundations Benchmark mapping
+    recs = enrich_recommendations(recs)
+
     counts = {"High": 0, "Medium": 0, "Low": 0}
     for r in recs:
         sev = r["severity"]
@@ -254,7 +258,8 @@ def assess_recommendations(client, limit=20):
     return {
         "total": len(recs),
         "counts": counts,
-        "top_recommendations": recs[:limit]
+        "top_recommendations": recs[:limit],
+        "by_cis_section": get_section_summary(recs)
     }
 
 
@@ -348,7 +353,21 @@ def print_report(subscription_id, plans, score, recommendations, contacts, auto_
         for r in top[:10]:
             affected = r.get("affected_resources", 1)
             suffix = f" ({affected} resources)" if affected > 1 else ""
-            print(f"    {severity_label(r['severity']):<14}  {r['name']}{suffix}")
+            cis = f"  [CIS {r['cis_id']}]" if r.get("cis_id") else "  [Unmapped]    "
+            print(f"    {severity_label(r['severity']):<14}{cis:<16}  {r['name']}{suffix}")
+
+    # CIS section summary
+    by_section = recommendations.get("by_cis_section", {})
+    if by_section:
+        print()
+        print("  By CIS section:")
+        for section, data in by_section.items():
+            high = data.get("High", 0)
+            med  = data.get("Medium", 0)
+            low  = data.get("Low", 0)
+            unk  = data.get("Unknown", 0)
+            unk_str = f" U:{unk}" if unk > 0 else ""
+            print(f"    {section:<45} H:{high} M:{med} L:{low}{unk_str}")
 
     # Security Contacts
     print("\n── Security Contacts ────────────────────────────────────")
