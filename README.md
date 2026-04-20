@@ -50,7 +50,7 @@ venv\Scripts\activate
 source venv/bin/activate
 
 # Install dependencies
-pip install azure-identity azure-mgmt-security azure-mgmt-subscription azure-cli-core
+pip install -r requirements.txt
 ```
 
 ---
