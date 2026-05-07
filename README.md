@@ -68,7 +68,7 @@ If you're on Windows using VS Code:
    You should see `(venv)` appear at the start of your prompt
 4. If it's a fresh environment, install dependencies:
    ```powershell
-   pip install azure-identity azure-mgmt-security azure-mgmt-subscription azure-cli-core
+   pip install -r requirements.txt
    ```
 5. Run the script:
    ```powershell
