@@ -16,9 +16,16 @@ Usage (from mdc_assess.py):
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
-from html import escape
+from html import escape, unescape
+
+try:
+    from cis_mapping import lookup_control
+    _CIS_AVAILABLE = True
+except ImportError:
+    _CIS_AVAILABLE = False
 
 
 # ── Severity helpers ───────────────────────────────────────────────────────────
@@ -39,6 +46,219 @@ def _badge(severity):
 
 def _esc(value):
     return escape(str(value)) if value is not None else ""
+
+
+def _sanitize_html(text):
+    """Sanitize MDC API remediation HTML for safe embedding in the report.
+    Preserves hyperlinks (opens in new tab), converts structure to readable lines,
+    and fixes common MDC formatting issues (missing spaces after periods)."""
+    if not text:
+        return ""
+
+    # Save <a href> tags as placeholders so they survive the strip pass
+    links = []
+
+    def save_link(m):
+        href = m.group(1)
+        link_text = re.sub(r'<[^>]+>', '', m.group(2))
+        links.append((href, unescape(link_text).strip()))
+        return f'__LINK{len(links) - 1}__'
+
+    text = re.sub(
+        r'<a[^>]+href=["\']([^"\']*)["\'][^>]*>(.*?)</a>',
+        save_link,
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # Convert block/line-break elements to newlines
+    # Handles <br>, <br/>, </br> (non-standard but used by MDC AWS findings)
+    text = re.sub(r'</?br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<li[^>]*>', '\n • ', text, flags=re.IGNORECASE)
+    text = re.sub(r'</li>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?(?:ol|ul|p|div)[^>]*>', '\n', text, flags=re.IGNORECASE)
+
+    # Strip all remaining tags
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # Unescape HTML entities in the remaining text content
+    text = unescape(text)
+
+    # Fix missing space after period: "sentence.Next" → "sentence. Next"
+    text = re.sub(r'\.([A-Z])', r'. \1', text)
+
+    # Break numbered steps onto their own lines
+    text = re.sub(r'(?<!\n)\s*(\d+\.)\s+', r'\n\1 ', text)
+
+    # Normalise lines: strip extra spaces, drop blank lines
+    lines = [re.sub(r' {2,}', ' ', ln).strip() for ln in text.split('\n')]
+    lines = [ln for ln in lines if ln]
+
+    # Save plain-text URLs (not already captured as <a> tags) as placeholders
+    url_links = []
+
+    def save_url(m):
+        url = m.group(1).rstrip('.,;:)')
+        url_links.append(url)
+        return f'__URL{len(url_links) - 1}__'
+
+    lines = [re.sub(r'(https?://\S+)', save_url, ln) for ln in lines]
+
+    # Escape text content for HTML, join with <br>
+    html = '<br>'.join(escape(ln) for ln in lines)
+
+    # Restore saved <a href> links (from original HTML)
+    for idx, (href, link_text) in enumerate(links):
+        anchor = (
+            f'<a href="{escape(href)}" target="_blank" rel="noopener">'
+            f'{escape(link_text)}</a>'
+        )
+        html = html.replace(f'__LINK{idx}__', anchor)
+
+    # Restore auto-detected plain-text URLs as hyperlinks
+    for idx, url in enumerate(url_links):
+        anchor = (
+            f'<a href="{escape(url)}" target="_blank" rel="noopener">'
+            f'{escape(url)}</a>'
+        )
+        html = html.replace(f'__URL{idx}__', anchor)
+
+    return html
+
+
+# ── Documentation URL lookup ───────────────────────────────────────────────────
+
+# Ordered list of (keyword, Security Hub control page URL) for AWS findings.
+# Checked against the lowercased finding name — first match wins.
+# Pages follow the pattern: securityhub/.../userguide/<service>-controls.html
+_AWS_FINDING_DOCS = [
+    # GuardDuty
+    ("guardduty",            "https://docs.aws.amazon.com/securityhub/latest/userguide/guardduty-controls.html"),
+    # Macie
+    ("macie",                "https://docs.aws.amazon.com/securityhub/latest/userguide/macie-controls.html"),
+    # CloudTrail — check before CloudWatch so "cloudtrail ... cloudwatch" hits cloudtrail
+    ("cloudtrail",           "https://docs.aws.amazon.com/securityhub/latest/userguide/cloudtrail-controls.html"),
+    # CloudWatch metric filter / alarm findings
+    ("log metric filter",    "https://docs.aws.amazon.com/securityhub/latest/userguide/cloudwatch-controls.html"),
+    ("cloudwatch",           "https://docs.aws.amazon.com/securityhub/latest/userguide/cloudwatch-controls.html"),
+    # S3 — specific phrases before generic "s3 bucket"
+    ("s3 block public",      "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"),
+    ("mfa delete",           "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"),
+    ("object-level logging", "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"),
+    ("lifecycle polic",      "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"),
+    ("secure socket layer",  "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"),
+    ("amazon s3",            "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"),
+    ("s3 bucket",            "https://docs.aws.amazon.com/securityhub/latest/userguide/s3-controls.html"),
+    # IAM — specific phrases before generic "iam"
+    ("iam access analyzer",  "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"),
+    ("password polic",       "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"),
+    ("password rotation",    "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"),
+    ("unused passwords",     "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"),
+    ("support role",         "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"),
+    ("root",                 "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"),
+    ("iam role is attached", "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("iam",                  "https://docs.aws.amazon.com/securityhub/latest/userguide/iam-controls.html"),
+    # EC2 / VPC / EBS — most specific phrases first
+    ("ebs default",          "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("ebs optimized",        "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("elastic blocks store", "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("vpc endpoint",         "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("vpc flow log",         "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("default security group","https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("ec2 subnet",           "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("ec2 instance",         "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("network acl",          "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("internet gateway",     "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("security groups",      "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("public ip",            "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("ebs",                  "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("ec2",                  "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    ("amazon ec2",           "https://docs.aws.amazon.com/securityhub/latest/userguide/ec2-controls.html"),
+    # SNS
+    ("amazon sns",           "https://docs.aws.amazon.com/securityhub/latest/userguide/sns-controls.html"),
+    ("sns topic",            "https://docs.aws.amazon.com/securityhub/latest/userguide/sns-controls.html"),
+    # EventBridge
+    ("eventbridge",          "https://docs.aws.amazon.com/securityhub/latest/userguide/eventbridge-controls.html"),
+    # Config — "aws config" before generic config
+    ("aws config",           "https://docs.aws.amazon.com/securityhub/latest/userguide/config-controls.html"),
+    # CloudFormation
+    ("cloudformation",       "https://docs.aws.amazon.com/securityhub/latest/userguide/cloudformation-controls.html"),
+    # KMS
+    ("kms",                  "https://docs.aws.amazon.com/securityhub/latest/userguide/kms-controls.html"),
+]
+
+# Azure CIS section prefix → Microsoft Learn documentation URL
+_AZURE_SECTION_DOCS = {
+    "1 —":   "https://learn.microsoft.com/en-us/entra/identity/",
+    "2.1 —": "https://learn.microsoft.com/en-us/azure/defender-for-cloud/",
+    "3 —":   "https://learn.microsoft.com/en-us/azure/storage/",
+    "4 —":   "https://learn.microsoft.com/en-us/azure/azure-sql/",
+    "5 —":   "https://learn.microsoft.com/en-us/azure/azure-monitor/",
+    "6 —":   "https://learn.microsoft.com/en-us/azure/networking/",
+    "7 —":   "https://learn.microsoft.com/en-us/azure/virtual-machines/",
+    "8 —":   "https://learn.microsoft.com/en-us/azure/key-vault/",
+    "9 —":   "https://learn.microsoft.com/en-us/azure/app-service/",
+}
+
+_MDC_FALLBACK_URL = (
+    "https://learn.microsoft.com/en-us/azure/defender-for-cloud/recommendations-reference"
+)
+
+
+def _docs_url(finding_name: str, cis_section: str = "") -> str:
+    """Return the most relevant documentation URL for a finding.
+    Returns an empty string if no match and no Azure section is supplied."""
+    name_lower = finding_name.lower()
+
+    # Detect AWS findings: explicit "aws"/"amazon" keyword or unambiguous AWS service terms.
+    # "security groups" (plural) is AWS-specific; Azure uses "NSG" / "Network Security Group".
+    # "network acl", "internet gateway", "log metric filter" are all AWS-specific.
+    _is_aws = (
+        "aws" in name_lower
+        or "amazon" in name_lower
+        or "guardduty" in name_lower
+        or "macie" in name_lower
+        or "cloudtrail" in name_lower
+        or "cloudwatch" in name_lower
+        or "cloudformation" in name_lower
+        or "eventbridge" in name_lower
+        or " ec2 " in name_lower
+        or name_lower.startswith("ec2 ")
+        or "ebs " in name_lower
+        or "elastic blocks" in name_lower
+        or " iam " in name_lower
+        or name_lower.startswith("iam ")
+        or "s3 bucket" in name_lower
+        or "s3 block" in name_lower
+        or "log metric filter" in name_lower
+        or "mfa delete" in name_lower
+        or "object-level logging" in name_lower
+        or "security groups" in name_lower
+        or "network acl" in name_lower
+        or "default security group" in name_lower
+        or "internet gateway" in name_lower
+        or "vpc flow log" in name_lower
+        or "root'" in name_lower
+    )
+    if _is_aws:
+        for keyword, url in _AWS_FINDING_DOCS:
+            if keyword in name_lower:
+                return url
+        return "https://docs.aws.amazon.com/securityhub/latest/userguide/"
+
+    # GitHub findings
+    if "github" in name_lower:
+        return "https://docs.github.com/en/code-security/"
+
+    # Azure CIS-mapped findings — match by section prefix
+    if cis_section:
+        section_lower = cis_section.lower()
+        for prefix, url in _AZURE_SECTION_DOCS.items():
+            if section_lower.startswith(prefix.lower()):
+                return url
+
+    # Generic MDC fallback for any Azure finding with a detail block
+    return _MDC_FALLBACK_URL if cis_section else ""
 
 
 # ── Section builders ───────────────────────────────────────────────────────────
@@ -150,11 +370,29 @@ def _build_findings_by_section(by_section):
             severity  = r.get("severity", "Unknown")
             affected  = r.get("affected_resources", 1)
             level     = _esc(r.get("cis_level") or "—")
+
+            current_api  = _sanitize_html(r.get("current_state") or r.get("current_cause"))
+            remediation  = _sanitize_html(r.get("remediation") or r.get("control_description"))
+            expected_val = r.get("expected_value")
+            fail_val     = r.get("current_value_if_fail")
+            cis_sec      = r.get("cis_section", "")
+            # Prefer live MDC observation; fall back to the CIS "fail" label
+            current_display = current_api or (_esc(fail_val) if fail_val else "")
+            has_detail = bool(expected_val or current_display or remediation)
+            doc_url    = r.get("cis_doc_url") or (_docs_url(r.get("name", ""), cis_sec) if has_detail else "")
+            detail_html = ""
+            if has_detail:
+                expected_row    = f'<div class="detail-row"><span class="detail-label">Expected</span><span class="detail-value ev-good">{_esc(expected_val)}</span></div>' if expected_val else ""
+                current_row     = f'<div class="detail-row"><span class="detail-label">Current</span><span class="detail-value ev-bad">{current_display}</span></div>' if current_display else ""
+                remediation_row = f'<div class="detail-row"><span class="detail-label">Remediation</span><span class="detail-value">{remediation}</span></div>' if remediation else ""
+                docs_row        = f'<div class="detail-row"><span class="detail-label">Documentation</span><span class="detail-value"><a href="{escape(doc_url)}" target="_blank" rel="noopener">View official documentation &#8599;</a></span></div>' if doc_url else ""
+                detail_html = f'<details class="finding-detail"><summary>How to fix</summary>{expected_row}{current_row}{remediation_row}{docs_row}</details>'
+
             rows.append(f"""
         <tr>
           <td>{_badge(severity)}</td>
           <td class="cis-id">{cis_id}</td>
-          <td>{name}</td>
+          <td><div class="finding-name">{name}</div>{detail_html}</td>
           <td class="center">{affected}</td>
           <td class="center">{level}</td>
         </tr>""")
@@ -175,13 +413,27 @@ def _build_findings_by_section(by_section):
         items = sorted(unmapped_section.get("items", []), key=lambda r: (SEVERITY_ORDER.get(r.get("severity"), 3), r.get("name", "")))
         rows = []
         for r in items:
-            name     = _esc(r.get("name", "Unknown"))
-            severity = r.get("severity", "Unknown")
-            affected = r.get("affected_resources", 1)
+            name        = _esc(r.get("name", "Unknown"))
+            severity    = r.get("severity", "Unknown")
+            affected    = r.get("affected_resources", 1)
+            current_api  = _sanitize_html(r.get("current_state") or r.get("current_cause"))
+            remediation  = _sanitize_html(r.get("remediation") or r.get("control_description"))
+            expected_val = r.get("expected_value")
+            fail_val     = r.get("current_value_if_fail")
+            current_display = current_api or (_esc(fail_val) if fail_val else "")
+            has_detail = bool(expected_val or current_display or remediation)
+            doc_url     = r.get("cis_doc_url") or (_docs_url(r.get("name", ""), "") if has_detail else "")
+            detail_html = ""
+            if has_detail:
+                expected_row    = f'<div class="detail-row"><span class="detail-label">Expected</span><span class="detail-value ev-good">{_esc(expected_val)}</span></div>' if expected_val else ""
+                current_row     = f'<div class="detail-row"><span class="detail-label">Current</span><span class="detail-value ev-bad">{current_display}</span></div>' if current_display else ""
+                remediation_row = f'<div class="detail-row"><span class="detail-label">Remediation</span><span class="detail-value">{remediation}</span></div>' if remediation else ""
+                docs_row        = f'<div class="detail-row"><span class="detail-label">Documentation</span><span class="detail-value"><a href="{escape(doc_url)}" target="_blank" rel="noopener">View official documentation &#8599;</a></span></div>' if doc_url else ""
+                detail_html = f'<details class="finding-detail"><summary>How to fix</summary>{expected_row}{current_row}{remediation_row}{docs_row}</details>'
             rows.append(f"""
         <tr>
           <td>{_badge(severity)}</td>
-          <td>{name}</td>
+          <td><div class="finding-name">{name}</div>{detail_html}</td>
           <td class="center">{affected}</td>
         </tr>""")
 
@@ -388,6 +640,40 @@ tr:hover td { background: #fafbfc; }
 .warning-note  { background: #fff8e1; border-left: 4px solid #f39c12; padding: 12px 16px; border-radius: 4px; color: #7d4e00; }
 .unmapped-note { font-size: 12px; color: #888; margin-bottom: 10px; font-style: italic; }
 
+/* Finding detail (remediation) */
+.finding-name { margin-bottom: 2px; }
+.finding-detail { margin-top: 5px; }
+.finding-detail summary {
+  font-size: 11px;
+  color: #0f3460;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  list-style: disclosure-closed;
+}
+.finding-detail[open] summary { list-style: disclosure-open; }
+.finding-detail summary:hover { text-decoration: underline; }
+.detail-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  background: #f8f9fb;
+  border-left: 3px solid #0f3460;
+  border-radius: 0 4px 4px 0;
+}
+.detail-label {
+  flex-shrink: 0;
+  width: 90px;
+  font-weight: 600;
+  color: #555;
+}
+.detail-value { color: #333; }
+.ev-good { color: #1a7f37; font-weight: 600; }
+.ev-bad  { color: #cf222e; font-weight: 600; }
+
 footer {
   text-align: center;
   font-size: 11px;
@@ -415,6 +701,19 @@ def generate_html_report(report_data: dict, output_path: str = "mdc_report.html"
     contacts      = report_data.get("security_contacts", [])
     auto_prov     = report_data.get("auto_provisioning", {})
     by_section    = recommendations.get("by_cis_section", {})
+
+    # Backfill expected_value / current_value_if_fail from CIS mapping for JSON
+    # snapshots that were generated before these fields were added.
+    if _CIS_AVAILABLE:
+        for section_data in by_section.values():
+            for rec in section_data.get("items", []):
+                if rec.get("expected_value") is None or rec.get("cis_doc_url") is None:
+                    m = lookup_control(rec.get("name", ""))
+                    if m:
+                        if rec.get("expected_value") is None:
+                            rec["expected_value"]        = m.get("expected_value")
+                            rec["current_value_if_fail"] = m.get("current_value_if_fail")
+                        rec["cis_doc_url"] = m.get("doc_url")
 
     # Format timestamp for display
     try:

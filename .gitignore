@@ -6,3 +6,4 @@ mdc_report.html
 .env
 *.json.bak
 CLAUDE.md
+*.claude

@@ -191,14 +191,17 @@ def assess_recommendations(client, limit=20):
 
     severity_order = {"High": 0, "Medium": 1, "Low": 2}
 
-    # Step 1 — build severity lookup from metadata definitions
-    severity_lookup = {}
+    # Step 1 — build metadata lookup (severity + control description + remediation)
+    meta_lookup = {}  # assessment_key -> {severity, description, remediation}
     try:
         for meta in client.assessments_metadata.list():
-            # meta.name is the assessment type GUID used as the key
-            sev = getattr(meta, 'severity', None)
-            if meta.name and sev:
-                severity_lookup[meta.name.lower()] = sev
+            if not meta.name:
+                continue
+            meta_lookup[meta.name.lower()] = {
+                "severity":    getattr(meta, 'severity', None),
+                "description": getattr(meta, 'description', None),
+                "remediation": getattr(meta, 'remediation_description', None),
+            }
     except Exception as e:
         print(f"  [WARN] Could not retrieve assessment metadata: {e}")
 
@@ -223,15 +226,22 @@ def assess_recommendations(client, limit=20):
             elif a.id:
                 assessment_key = a.id.split("/assessments/")[-1].lower()
 
-            severity = severity_lookup.get(assessment_key, "Unknown")
+            meta = meta_lookup.get(assessment_key, {})
+            severity = meta.get("severity") or "Unknown"
 
             if display in seen:
                 seen[display]["affected_resources"] += 1
             else:
                 seen[display] = {
-                    "severity": severity,
+                    "severity":           severity,
                     "affected_resources": 1,
-                    "resource_type": getattr(a, 'type', "Unknown"),
+                    "resource_type":      getattr(a, 'type', "Unknown"),
+                    # current state: what MDC observed on this resource
+                    "current_state":      getattr(a.status, 'description', None) if a.status else None,
+                    "current_cause":      getattr(a.status, 'cause', None) if a.status else None,
+                    # expected state: what the control requires (from metadata)
+                    "control_description": meta.get("description"),
+                    "remediation":        meta.get("remediation"),
                 }
 
     except Exception as e:
@@ -239,10 +249,16 @@ def assess_recommendations(client, limit=20):
 
     # Build sorted deduplicated list
     recs = [
-        {"name": name,
-         "severity": v["severity"],
-         "affected_resources": v["affected_resources"],
-         "resource_type": v["resource_type"]}
+        {
+            "name":                name,
+            "severity":            v["severity"],
+            "affected_resources":  v["affected_resources"],
+            "resource_type":       v["resource_type"],
+            "current_state":       v.get("current_state"),
+            "current_cause":       v.get("current_cause"),
+            "control_description": v.get("control_description"),
+            "remediation":         v.get("remediation"),
+        }
         for name, v in seen.items()
     ]
     recs.sort(key=lambda r: (severity_order.get(r["severity"], 99), r["name"]))
@@ -356,6 +372,17 @@ def print_report(subscription_id, plans, score, recommendations, contacts, auto_
             suffix = f" ({affected} resources)" if affected > 1 else ""
             cis = f"  [CIS {r['cis_id']}]" if r.get("cis_id") else "  [Unmapped]    "
             print(f"    {severity_label(r['severity']):<14}{cis:<16}  {r['name']}{suffix}")
+            expected = r.get("expected_value")
+            current  = r.get("current_value_if_fail") or r.get("current_state") or r.get("current_cause")
+            if expected or current:
+                exp_str = f"Expected: {expected}" if expected else ""
+                cur_str = f"Current: {current}" if current else ""
+                cv_line = "  |  ".join(filter(None, [exp_str, cur_str]))
+                print(f"    {'':14}{'':16}  → {cv_line}")
+            remediation = r.get("remediation") or r.get("control_description")
+            if remediation:
+                trunc = remediation[:100] + "…" if len(remediation) > 100 else remediation
+                print(f"    {'':14}{'':16}  ↳ {trunc}")
 
     # CIS section summary
     by_section = recommendations.get("by_cis_section", {})
