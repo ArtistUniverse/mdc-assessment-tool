@@ -389,7 +389,7 @@ def _build_findings_by_section(by_section):
                 detail_html = f'<details class="finding-detail"><summary>How to fix</summary>{expected_row}{current_row}{remediation_row}{docs_row}</details>'
 
             rows.append(f"""
-        <tr>
+        <tr data-severity="{severity}">
           <td>{_badge(severity)}</td>
           <td class="cis-id">{cis_id}</td>
           <td><div class="finding-name">{name}</div>{detail_html}</td>
@@ -431,7 +431,7 @@ def _build_findings_by_section(by_section):
                 docs_row        = f'<div class="detail-row"><span class="detail-label">Documentation</span><span class="detail-value"><a href="{escape(doc_url)}" target="_blank" rel="noopener">View official documentation &#8599;</a></span></div>' if doc_url else ""
                 detail_html = f'<details class="finding-detail"><summary>How to fix</summary>{expected_row}{current_row}{remediation_row}{docs_row}</details>'
             rows.append(f"""
-        <tr>
+        <tr data-severity="{severity}">
           <td>{_badge(severity)}</td>
           <td><div class="finding-name">{name}</div>{detail_html}</td>
           <td class="center">{affected}</td>
@@ -674,6 +674,38 @@ tr:hover td { background: #fafbfc; }
 .ev-good { color: #1a7f37; font-weight: 600; }
 .ev-bad  { color: #cf222e; font-weight: 600; }
 
+/* Severity filter bar */
+.severity-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.filter-label {
+  font-size: 12px;
+  color: #666;
+  font-weight: 600;
+  margin-right: 2px;
+}
+.filter-btn {
+  padding: 5px 16px;
+  border-radius: 14px;
+  border: 2px solid #d0d7de;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #444;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.filter-btn:hover { border-color: #999; }
+.filter-btn.active                { background: #0f3460; border-color: #0f3460; color: #fff; }
+.filter-btn-high.active           { background: #c0392b; border-color: #c0392b; color: #fff; }
+.filter-btn-medium.active         { background: #b7770d; border-color: #b7770d; color: #fff; }
+.filter-btn-low.active            { background: #1a6a9a; border-color: #1a6a9a; color: #fff; }
+.filter-btn-unknown.active        { background: #666;    border-color: #666;    color: #fff; }
+
 footer {
   text-align: center;
   font-size: 11px;
@@ -748,6 +780,14 @@ def generate_html_report(report_data: dict, output_path: str = "mdc_report.html"
   {_build_defender_plans(plans)}
 
   <h2>Findings by CIS Section</h2>
+  <div class="severity-filter">
+    <span class="filter-label">Filter:</span>
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn filter-btn-high" data-filter="High">High</button>
+    <button class="filter-btn filter-btn-medium" data-filter="Medium">Medium</button>
+    <button class="filter-btn filter-btn-low" data-filter="Low">Low</button>
+    <button class="filter-btn filter-btn-unknown" data-filter="Unknown">Unknown</button>
+  </div>
   {_build_findings_by_section(by_section)}
 
   <h2>Security Contacts</h2>
@@ -765,6 +805,32 @@ def generate_html_report(report_data: dict, output_path: str = "mdc_report.html"
 </body>
 </html>
 """
+
+    # Inject the severity-filter script (kept outside the f-string to avoid
+    # escaping every JS brace as {{ }}).
+    FILTER_JS = """<script>
+(function () {
+  var btns = document.querySelectorAll('.filter-btn');
+  btns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      var filter = btn.dataset.filter;
+      document.querySelectorAll('tr[data-severity]').forEach(function (row) {
+        row.style.display = (filter === 'all' || row.dataset.severity === filter) ? '' : 'none';
+      });
+      document.querySelectorAll('.section-block').forEach(function (block) {
+        var rows = block.querySelectorAll('tr[data-severity]');
+        var visible = 0;
+        rows.forEach(function (r) { if (r.style.display !== 'none') visible++; });
+        block.style.display = visible === 0 ? 'none' : '';
+      });
+    });
+  });
+}());
+</script>
+"""
+    html = html.replace("</body>", FILTER_JS + "</body>", 1)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)

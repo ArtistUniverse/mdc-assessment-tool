@@ -372,6 +372,62 @@ CIS_MAPPING = {
         "current_value_if_fail": "No alert configured",
         "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-create-activity-log-alert-rule",
     },
+    "azure subscriptions should have a log profile for activity log": {
+        "cis_id": "5.1.1", "cis_title": "Ensure That a Diagnostic Setting Exists for Subscription Activity Logs",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "Activity log profile configured",
+        "current_value_if_fail": "No activity log profile",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/activity-log",
+    },
+    "azure monitor log profile should collect logs for categories 'write,' 'delete,' and 'action'": {
+        "cis_id": "5.1.3", "cis_title": "Ensure Audit Profile Captures All the Activities",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "write, delete, and action categories captured",
+        "current_value_if_fail": "Not all activity categories captured",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/activity-log",
+    },
+    "azure monitor should collect activity logs from all regions": {
+        "cis_id": "5.1.4", "cis_title": "Ensure That Activity Logs Are Collected From All Regions",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "All regions including global selected",
+        "current_value_if_fail": "Not all regions selected",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/activity-log",
+    },
+    "azure monitor solution 'security and audit' must be deployed": {
+        "cis_id": "5.3.1", "cis_title": "Ensure That Security and Audit Solution Is Deployed",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "Security and Audit solution deployed",
+        "current_value_if_fail": "Security and Audit solution not deployed",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/activity-log",
+    },
+    "an activity log alert should exist for specific policy operations": {
+        "cis_id": "5.2.1", "cis_title": "Ensure That Activity Log Alert Exists For Create Policy Assignment",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "Alert configured for policy operations",
+        "current_value_if_fail": "No alert for policy operations",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-create-activity-log-alert-rule",
+    },
+    "an activity log alert should exist for specific administrative operations": {
+        "cis_id": "5.2.9", "cis_title": "Ensure That Activity Log Alert Exists For Administrative Operations",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "Alert configured for administrative operations",
+        "current_value_if_fail": "No alert for administrative operations",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-create-activity-log-alert-rule",
+    },
+    "an activity log alert should exist for specific security operations": {
+        "cis_id": "5.2.6", "cis_title": "Ensure That Activity Log Alert Exists For Create or Update Security Solution",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "Alert configured for security operations",
+        "current_value_if_fail": "No alert for security operations",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-create-activity-log-alert-rule",
+    },
+    "an activity log alert should exist for the delete network security group rule": {
+        "cis_id": "5.2.5", "cis_title": "Ensure That Activity Log Alert Exists For Delete Network Security Group Rule",
+        "section": "5 — Logging and Monitoring", "level": "L1",
+        "expected_value": "Alert configured",
+        "current_value_if_fail": "No alert configured",
+        "doc_url": "https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-create-activity-log-alert-rule",
+    },
 
     # Section 6 - Networking
     "rdp access from the internet should be blocked": {
