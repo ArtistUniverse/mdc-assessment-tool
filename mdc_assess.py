@@ -48,6 +48,7 @@ from azure.identity import InteractiveBrowserCredential
 from azure.mgmt.security import SecurityCenter
 from azure.mgmt.subscription import SubscriptionClient
 from cis_mapping import enrich_recommendations, get_section_summary
+from report_generator import generate_html_report
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -387,7 +388,8 @@ def print_report(subscription_id, plans, score, recommendations, contacts, auto_
         print("  No auto-provisioning data available.")
 
     print("\n" + "=" * 60)
-    print("  Full report saved to: mdc_report.json")
+    print("  Full report saved to : mdc_report.json")
+    print("  HTML report saved to : mdc_report.html")
     print("=" * 60 + "\n")
 
 
@@ -411,7 +413,7 @@ def save_report(subscription_id, plans, score, recommendations, contacts, auto_p
     with open(path, "w") as f:
         json.dump(report, f, indent=2)
 
-    return path
+    return report
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -445,7 +447,8 @@ def main():
 
     # Output
     print_report(subscription_id, plans, score, recs, contacts, auto_prov)
-    save_report(subscription_id, plans, score, recs, contacts, auto_prov)
+    report_data = save_report(subscription_id, plans, score, recs, contacts, auto_prov)
+    generate_html_report(report_data)
 
 
 if __name__ == "__main__":

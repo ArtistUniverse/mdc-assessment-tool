@@ -2,6 +2,7 @@ venv/
 __pycache__/
 *.pyc
 mdc_report.json
+mdc_report.html
 .env
 *.json.bak
 CLAUDE.md

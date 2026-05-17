@@ -47,7 +47,7 @@ python -m venv venv
 venv\Scripts\activate
 
 # macOS/Linux
-source venv/bin/activate
+source venv/Scripts/activate
 
 # Install dependencies
 pip install -r requirements.txt
@@ -55,31 +55,6 @@ pip install -r requirements.txt
 
 ---
 
-## Windows Quickstart
-
-If you're on Windows using VS Code:
-
-1. Open the project folder in VS Code
-2. Open a **PowerShell terminal** inside VS Code (Terminal → New Terminal)
-3. Activate the virtual environment:
-   ```powershell
-   venv\Scripts\activate
-   ```
-   You should see `(venv)` appear at the start of your prompt
-4. If it's a fresh environment, install dependencies:
-   ```powershell
-   pip install -r requirements.txt
-   ```
-5. Run the script:
-   ```powershell
-   python mdc_assess.py
-   ```
-6. A browser window will open — sign in with your Azure account
-7. Select the subscription number you want to assess
-
-> **Note:** Always run from a PowerShell terminal in VS Code, not Command Prompt. The venv activation command differs between the two.
-
----
 
 ## Authentication
 
@@ -107,7 +82,7 @@ Full results are saved to `mdc_report.json` in the working directory. This file 
 
 ## Security
 
-- Never commit `mdc_report.json` — it contains real subscription data
+- Never commit `mdc_report.json` and `mdc_report.html` — it contains real subscription data
 - Never hardcode subscription IDs, tenant IDs, or credentials in the script
 - Secret scanning and push protection are enabled on this repository
 
