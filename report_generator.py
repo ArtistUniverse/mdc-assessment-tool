@@ -767,7 +767,7 @@ def generate_html_report(report_data: dict, output_path: str = "mdc_report.html"
 <header>
   <h1>Microsoft Defender for Cloud &mdash; Assessment Report</h1>
   <div class="meta">
-    Subscription: {_esc(sub_id)} &nbsp;&bull;&nbsp; Generated: {_esc(display_time)}
+    Subscription: {_esc(sub_id)} &nbsp;&bull;&nbsp; Generated: {_esc(display_time)} &nbsp;&bull;&nbsp; Framework: CIS Azure Foundations Benchmark v2.0.0
   </div>
 </header>
 
@@ -838,12 +838,121 @@ def generate_html_report(report_data: dict, output_path: str = "mdc_report.html"
     return output_path
 
 
+# ── CSV report ────────────────────────────────────────────────────────────────
+
+def _strip_html_to_text(text: str) -> str:
+    """Convert MDC remediation HTML to plain text suitable for a CSV cell."""
+    if not text:
+        return ""
+    text = re.sub(r'</?br\s*/?>', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'<li[^>]*>', ' • ', text, flags=re.IGNORECASE)
+    text = re.sub(r'</?(?:ol|ul|p|div)[^>]*>', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
+    from html import unescape as _unescape
+    text = _unescape(text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _detect_platform(finding_name: str, is_unmapped: bool) -> str:
+    """Infer the source cloud platform from a finding name."""
+    if not is_unmapped:
+        return "Azure"
+    name = finding_name.lower()
+    if "github" in name or "top-level permissions" in name:
+        return "GitHub"
+    if any(t in name for t in ("google", "gcp", "private_ip_google", "shielded vm",
+                               "compute instance", "project-wide")):
+        return "GCP"
+    aws_terms = (
+        "aws", "amazon", "guardduty", "macie", "cloudtrail", "cloudwatch",
+        "cloudformation", "eventbridge", "ec2", "ebs", "elastic block",
+        "iam", "s3 bucket", "s3 block", "log metric filter", "mfa delete",
+        "object-level logging", "security groups", "network acl",
+        "default security group", "internet gateway", "vpc flow log",
+        "vpc endpoint", "sns topic", "kms", "root user", "root account",
+        "'root'", "instance metadata",
+    )
+    if any(t in name for t in aws_terms):
+        return "AWS"
+    azure_terms = (
+        "azure", "security center", "microsoft", "vnet", "virtual machine",
+        "linux vm", "vm disk", "network interface",
+    )
+    if any(t in name for t in azure_terms):
+        return "Azure"
+    return "Other"
+
+
+def generate_csv_report(report_data: dict, output_path: str = "mdc_report.csv") -> str:
+    """
+    Generate a CSV remediation-tracking export from report data.
+    Includes all findings (mapped and unmapped) sorted by platform, severity, then name.
+    Returns the output path.
+    """
+    import csv
+
+    by_section = report_data.get("recommendations", {}).get("by_cis_section", {})
+
+    rows = []
+    for section_name, data in by_section.items():
+        is_unmapped = (section_name == "Unmapped")
+        for item in data.get("items", []):
+            name = item.get("name", "")
+            platform = _detect_platform(name, is_unmapped)
+            cis_section = (
+                item.get("cis_section")
+                if not is_unmapped
+                else f"Non-Azure / Multicloud ({platform})"
+            )
+            remediation_text = _strip_html_to_text(
+                item.get("remediation") or item.get("expected_value") or ""
+            )
+            rows.append({
+                "Platform":           platform,
+                "Finding":            name,
+                "Severity":           item.get("severity", "Unknown"),
+                "CIS ID (Azure Foundations Benchmark v2.0.0)": item.get("cis_id") or "N/A — not an Azure control",
+                "CIS Section":        cis_section,
+                "Affected Resources": item.get("affected_resources", ""),
+                "Status":             "Open",
+                "Remediation":        remediation_text,
+            })
+
+    # Sort: Azure first, then by severity, then alphabetically
+    platform_order = {"Azure": 0, "AWS": 1, "GitHub": 2, "GCP": 3, "Other": 4}
+    rows.sort(key=lambda r: (
+        platform_order.get(r["Platform"], 3),
+        SEVERITY_ORDER.get(r["Severity"], 3),
+        r["Finding"].lower(),
+    ))
+
+    fieldnames = [
+        "Platform", "Finding", "Severity",
+        "CIS ID (Azure Foundations Benchmark v2.0.0)", "CIS Section",
+        "Affected Resources", "Status", "Remediation",
+    ]
+
+    # utf-8-sig adds a BOM so Excel auto-detects UTF-8 encoding
+    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return output_path
+
+
 # ── Standalone entry point ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate HTML report from mdc_report.json")
+    parser = argparse.ArgumentParser(description="Generate reports from mdc_report.json")
     parser.add_argument("--input", default="mdc_report.json", help="Path to JSON report (default: mdc_report.json)")
     parser.add_argument("--output", default="mdc_report.html", help="Output HTML path (default: mdc_report.html)")
+    parser.add_argument(
+        "--output-format",
+        choices=["html", "csv", "all"],
+        default="html",
+        help="Report format to generate (default: html)",
+    )
     args = parser.parse_args()
 
     try:
@@ -856,8 +965,13 @@ def main():
         print(f"[ERROR] Invalid JSON in {args.input}: {e}")
         sys.exit(1)
 
-    out = generate_html_report(report_data, args.output)
-    print(f"[INFO] HTML report saved to: {out}")
+    if args.output_format in ("html", "all"):
+        out = generate_html_report(report_data, args.output)
+        print(f"[INFO] HTML report saved to: {out}")
+    if args.output_format in ("csv", "all"):
+        csv_path = args.output.replace(".html", ".csv") if args.output.endswith(".html") else "mdc_report.csv"
+        out = generate_csv_report(report_data, csv_path)
+        print(f"[INFO] CSV report saved to: {out}")
 
 
 if __name__ == "__main__":

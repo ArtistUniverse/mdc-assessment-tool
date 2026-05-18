@@ -44,11 +44,11 @@ def suppress_stderr():
         finally:
             sys.stderr = old_stderr
 
-from azure.identity import InteractiveBrowserCredential
+from azure.identity import InteractiveBrowserCredential, TokenCachePersistenceOptions
 from azure.mgmt.security import SecurityCenter
 from azure.mgmt.subscription import SubscriptionClient
 from cis_mapping import enrich_recommendations, get_section_summary
-from report_generator import generate_html_report
+from report_generator import generate_html_report, generate_csv_report
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -448,12 +448,20 @@ def save_report(subscription_id, plans, score, recommendations, contacts, auto_p
 def main():
     parser = argparse.ArgumentParser(description="MDC Subscription Assessment")
     parser.add_argument("--subscription-id", help="Azure subscription ID (optional — will prompt if not supplied)")
+    parser.add_argument(
+        "--output-format",
+        choices=["json", "html", "csv", "all"],
+        default="all",
+        help="Output format(s) to generate (default: all)",
+    )
     args = parser.parse_args()
 
-    print("\n[INFO] A browser window will open — sign in with your Azure account.\n")
+    print("\n[INFO] Authenticating — a browser window will open on first run (token is cached after that).\n")
 
     try:
-        credential = InteractiveBrowserCredential()
+        credential = InteractiveBrowserCredential(
+            cache_persistence_options=TokenCachePersistenceOptions(name="mdc_assess")
+        )
     except Exception as e:
         print(f"[ERROR] Authentication failed: {e}")
         sys.exit(1)
@@ -475,7 +483,12 @@ def main():
     # Output
     print_report(subscription_id, plans, score, recs, contacts, auto_prov)
     report_data = save_report(subscription_id, plans, score, recs, contacts, auto_prov)
-    generate_html_report(report_data)
+
+    fmt = args.output_format
+    if fmt in ("html", "all"):
+        generate_html_report(report_data)
+    if fmt in ("csv", "all"):
+        generate_csv_report(report_data)
 
 
 if __name__ == "__main__":
