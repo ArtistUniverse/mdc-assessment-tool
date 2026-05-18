@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 mdc_report.json
 mdc_report.html
+mdc_report.csv
 .env
 *.json.bak
 CLAUDE.md

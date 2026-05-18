@@ -14,7 +14,7 @@ Connects to an Azure subscription and pulls a point-in-time snapshot of:
 - **Security Contacts** — whether alert notification contacts are configured
 - **Auto-Provisioning** — whether monitoring agents deploy automatically to new resources
 
-Output is written to the console and saved as `mdc_report.json` for use in client deliverables.
+Output is written to the console and saved as report files for use in client deliverables. By default all three formats are generated — JSON, HTML, and CSV.
 
 ---
 
@@ -74,15 +74,46 @@ python mdc_assess.py --subscription-id <your-subscription-id>
 
 ---
 
-## JSON Report
+## Output Formats
 
-Full results are saved to `mdc_report.json` in the working directory. This file is excluded from version control via `.gitignore` — do not commit it as it contains subscription-specific security data.
+By default the tool generates all three output files. Use `--output-format` to control which files are produced:
 
+```bash
+# All three formats (default)
+python mdc_assess.py
+
+# HTML report only
+python mdc_assess.py --output-format html
+
+# CSV spreadsheet only
+python mdc_assess.py --output-format csv
+
+# Raw JSON only (useful for scripting or piping into other tools)
+python mdc_assess.py --output-format json
+```
+
+| Format | File | Description |
+|--------|------|-------------|
+| `json` | `mdc_report.json` | Full raw assessment data. Always saved — it is the source of truth for re-generating other formats. |
+| `html` | `mdc_report.html` | Self-contained HTML report. Opens in any browser with no internet required. Includes executive summary, Defender plan status, findings by CIS section, security contacts, and auto-provisioning. |
+| `csv`  | `mdc_report.csv`  | Spreadsheet-friendly export for remediation tracking. One row per finding with Platform, Severity, CIS ID, CIS Section, Affected Resources, Status, and Remediation steps. Use the **Platform** column to filter down to Azure-only findings. |
+
+> **Note:** All three output files contain real subscription data and are excluded from version control via `.gitignore`. Do not commit them.
+
+You can also re-generate the HTML or CSV from an existing JSON file without re-running the full assessment:
+
+```bash
+# Re-generate both from an existing mdc_report.json
+python report_generator.py --output-format all
+
+# Re-generate CSV only
+python report_generator.py --output-format csv
+```
 ---
 
 ## Security
 
-- Never commit `mdc_report.json` and `mdc_report.html` — it contains real subscription data
+- Never commit `mdc_report.json`, `mdc_report.html`, or `mdc_report.csv` — they contain real subscription data
 - Never hardcode subscription IDs, tenant IDs, or credentials in the script
 - Secret scanning and push protection are enabled on this repository
 
