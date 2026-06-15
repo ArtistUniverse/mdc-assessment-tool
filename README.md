@@ -49,18 +49,36 @@ requests    # AI analysis (ai_agent.py / --ai)
 git clone https://github.com/YOUR_ORG/mdc-assessment-tool.git
 cd mdc-assessment-tool
 
-# Create and activate a virtual environment
+# Create a virtual environment
 python -m venv venv
+```
 
-# Windows
-venv\Scripts\activate
+Activate it for your platform:
 
-# macOS/Linux
-source venv/Scripts/activate
+```powershell
+# Windows (PowerShell)
+venv\Scripts\Activate.ps1
+```
 
-# Install dependencies
+```bat
+REM Windows (Command Prompt)
+venv\Scripts\activate.bat
+```
+
+```bash
+# macOS / Linux
+source venv/bin/activate
+```
+
+Then install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
+
+> **`python` vs `python3`:** On Windows use `python`. On many macOS/Linux systems
+> the command is `python3` (and `pip3`). Once your virtual environment is
+> activated, plain `python` and `pip` resolve to the venv on all platforms.
 
 ---
 
@@ -211,7 +229,13 @@ Copy the example file and fill in your provider details (or export the same name
 as environment variables):
 
 ```bash
+# macOS / Linux
 cp .env.example .env
+```
+
+```powershell
+# Windows (PowerShell)
+Copy-Item .env.example .env
 ```
 
 ```bash
@@ -260,10 +284,21 @@ Results are written to `mdc_ai_analysis.json`.
 and framework, optionally enable AI, watch progress, then view and download the
 HTML / JSON / CSV reports.
 
-```bash
-pip install flask
+With your virtual environment activated (see **Installation**) and dependencies
+installed, start the server:
+
+```powershell
+# Windows (PowerShell)
 python app.py            # then open http://127.0.0.1:5000
 ```
+
+```bash
+# macOS / Linux
+python3 app.py           # then open http://127.0.0.1:5000
+```
+
+If Flask is not already installed, run `pip install flask` first. Use `--port` to
+change the port (e.g. `python app.py --port 8000`); it binds to `127.0.0.1` by default.
 
 > **Local use only.** Authentication uses `InteractiveBrowserCredential`, which
 > opens a sign-in window on the machine running the server. The app binds to
