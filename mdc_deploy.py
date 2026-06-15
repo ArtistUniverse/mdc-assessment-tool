@@ -310,6 +310,93 @@ def write_deployment_plan(actions, subscription_id, path="mdc_deployment_plan.js
     return path
 
 
+# ── Post-deployment validation (Issue 11) ───────────────────────────────────────
+
+def _all_findings(report):
+    """Flatten every finding in a report into {name: finding_dict}."""
+    findings = {}
+    by_section = report.get("recommendations", {}).get("by_cis_section", {}) or {}
+    for section in by_section.values():
+        for item in section.get("items", []):
+            name = item.get("name")
+            if name:
+                findings[name] = item
+    return findings
+
+
+def build_validation_diff(pre_report, post_report):
+    """
+    Compare a pre-deployment report against a freshly-collected post-deployment
+    report and return what was fixed, what remains, and anything new. Pure — no
+    Azure calls.
+    """
+    pre = _all_findings(pre_report)
+    post = _all_findings(post_report)
+    pre_names, post_names = set(pre), set(post)
+
+    fixed = sorted(pre_names - post_names)
+    remaining = sorted(pre_names & post_names)
+    new = sorted(post_names - pre_names)
+
+    def _sev(findings, names):
+        return [{"name": n, "severity": findings[n].get("severity", "Unknown"),
+                 "cis_id": findings[n].get("cis_id")} for n in names]
+
+    pre_score = pre_report.get("secure_score", {}) or {}
+    post_score = post_report.get("secure_score", {}) or {}
+
+    return {
+        "summary": {
+            "fixed": len(fixed),
+            "remaining": len(remaining),
+            "new": len(new),
+            "secure_score_before": pre_score.get("percentage"),
+            "secure_score_after": post_score.get("percentage"),
+        },
+        "fixed": _sev(pre, fixed),
+        "remaining": _sev(post, remaining),
+        "new": _sev(post, new),
+    }
+
+
+def write_validation_report(diff, subscription_id, path="mdc_validation_report.json"):
+    """Persist the validation diff."""
+    report = {
+        "validation_metadata": {
+            "subscription_id": subscription_id,
+            "validated_at": datetime.now(timezone.utc).isoformat(),
+            "tool": "mdc_deploy.py",
+        },
+        **diff,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    return path
+
+
+def print_validation_summary(diff):
+    """Print a human-readable validation summary."""
+    s = diff["summary"]
+    print("\n" + "=" * 64)
+    print("  POST-DEPLOYMENT VALIDATION")
+    print("=" * 64)
+    print(f"  Fixed     : {s['fixed']}")
+    print(f"  Remaining : {s['remaining']}")
+    print(f"  New       : {s['new']}")
+    before, after = s.get("secure_score_before"), s.get("secure_score_after")
+    if before is not None or after is not None:
+        print(f"  Secure Score : {before}% → {after}%")
+    if diff["fixed"]:
+        print("\n  ✅ Fixed:")
+        for f in diff["fixed"]:
+            print(f"     - {f['name']}")
+    if diff["remaining"]:
+        print("\n  ⚠️  Still open:")
+        for f in diff["remaining"]:
+            print(f"     - {f['name']}")
+    print("=" * 64 + "\n")
+
+
 # ── Entry point ─────────────────────────────────────────────────────────────────
 
 
@@ -328,6 +415,8 @@ def main():
                         help="Do not enable auto-provisioning")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview changes and write mdc_deployment_plan.json; make no changes")
+    parser.add_argument("--validate", action="store_true",
+                        help="Re-run the assessment after deployment and diff against the input report")
     parser.add_argument("--yes", action="store_true",
                         help="Skip the confirmation prompt and apply changes")
     args = parser.parse_args()
@@ -354,6 +443,8 @@ def main():
     if args.dry_run:
         plan_path = write_deployment_plan(actions, subscription_id)
         print(f"[INFO] Dry run — no changes made. Plan written to: {plan_path}\n")
+        if args.validate:
+            print("[INFO] --validate has no effect in dry-run mode (nothing changed).\n")
         return
 
     if not args.yes and not confirm():
@@ -397,6 +488,22 @@ def main():
     failed = sum(1 for r in results if r["status"] == "failed")
     print(f"\n[INFO] Deployment complete: {applied} applied, {failed} failed.")
     print(f"[INFO] Change log saved to: {log_path}\n")
+
+    # Post-deployment validation (Issue 11)
+    if args.validate:
+        print("[INFO] Re-running assessment to validate remediation ...\n")
+        try:
+            from mdc_assess import run_assessment
+        except ImportError as e:
+            print(f"[ERROR] Could not import assessment module: {e}")
+            return
+        framework_name = (report.get("report_metadata", {})
+                          .get("framework", {}).get("name", "cis"))
+        post_report = run_assessment(client, subscription_id, framework_name)
+        diff = build_validation_diff(report, post_report)
+        print_validation_summary(diff)
+        val_path = write_validation_report(diff, subscription_id)
+        print(f"[INFO] Validation report saved to: {val_path}\n")
 
 
 if __name__ == "__main__":
