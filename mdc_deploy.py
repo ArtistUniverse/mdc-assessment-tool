@@ -187,6 +187,7 @@ def confirm(prompt="Proceed with deployment?"):
 
 # ── Execution (Azure SDK calls) ─────────────────────────────────────────────────
 
+
 def _enable_defender_plan(client, scope, name):
     """Set a Defender plan to the Standard tier. Tolerates SDK signature drift."""
     from azure.mgmt.security.models import Pricing
@@ -284,7 +285,33 @@ def write_deployment_log(results, subscription_id, path="mdc_deployment_log.json
     return path
 
 
+def write_deployment_plan(actions, subscription_id, path="mdc_deployment_plan.json"):
+    """
+    Persist the proposed (dry-run) plan without applying anything. Captures the
+    current -> expected value for every action so it can be reviewed before a
+    real deployment. Makes zero Azure API calls.
+    """
+    active = [a for a in actions if not a.get("skip")]
+    skipped = [a for a in actions if a.get("skip")]
+    plan = {
+        "plan_metadata": {
+            "subscription_id": subscription_id,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "tool": "mdc_deploy.py",
+            "mode": "dry-run",
+            "changes": len(active),
+            "skipped": len(skipped),
+        },
+        "proposed_changes": active,
+        "skipped_changes": skipped,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(plan, f, indent=2)
+    return path
+
+
 # ── Entry point ─────────────────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(description="MDC Baseline Deployment (Phase 2)")
@@ -299,6 +326,8 @@ def main():
                         help="Limit Defender plan enablement to these plan names")
     parser.add_argument("--no-auto-provisioning", action="store_true",
                         help="Do not enable auto-provisioning")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Preview changes and write mdc_deployment_plan.json; make no changes")
     parser.add_argument("--yes", action="store_true",
                         help="Skip the confirmation prompt and apply changes")
     args = parser.parse_args()
@@ -320,6 +349,11 @@ def main():
 
     active = print_plan(actions)
     if not active:
+        return
+
+    if args.dry_run:
+        plan_path = write_deployment_plan(actions, subscription_id)
+        print(f"[INFO] Dry run — no changes made. Plan written to: {plan_path}\n")
         return
 
     if not args.yes and not confirm():
