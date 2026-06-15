@@ -4,6 +4,10 @@ __pycache__/
 mdc_report.json
 mdc_report.html
 mdc_report.csv
+mdc_ai_analysis.json
+mdc_deployment_log.json
+mdc_deployment_plan.json
+mdc_validation_report.json
 .env
 *.json.bak
 CLAUDE.md

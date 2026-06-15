@@ -480,6 +480,14 @@ def main():
         default="cis",
         help="Compliance framework to map findings against (default: cis)",
     )
+    parser.add_argument(
+        "--ai",
+        nargs="?",
+        const="explain",
+        choices=["explain", "prioritize", "guidance", "review"],
+        help="Run optional AI analysis after the assessment (bring-your-own-API; "
+             "defaults to 'explain'). Requires MDC_AI_* env vars — see .env.example.",
+    )
     args = parser.parse_args()
 
     print("\n[INFO] Authenticating — a browser window will open on first run (token is cached after that).\n")
@@ -519,6 +527,17 @@ def main():
         generate_html_report(report_data)
     if fmt in ("csv", "all"):
         generate_csv_report(report_data)
+
+    # Optional AI analysis (Issue 12) — bring-your-own-API, fully optional.
+    if args.ai:
+        try:
+            from ai_agent import run_task, AIError
+            try:
+                run_task(report_data, args.ai)
+            except AIError as e:
+                print(f"[AI] [ERROR] {e}")
+        except ImportError as e:
+            print(f"[AI] [WARN] AI module unavailable: {e}")
 
 
 if __name__ == "__main__":
