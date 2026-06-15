@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Assessment progress{% endblock %}
+{% block content %}
+<section class="card" data-job-id="{{ job.id }}">
+  <div class="status-head">
+    <h1>Assessment</h1>
+    <span id="status-pill" class="pill running">queued</span>
+  </div>
+  <p class="muted" id="sub-line">Subscription: {{ job.subscription_id or 'auto-select' }}
+    &middot; Framework: {{ job.framework }}{% if job.ai_task %} &middot; AI: {{ job.ai_task }}{% endif %}</p>
+
+  <div id="progress" class="progress">
+    <div id="bar" class="bar"></div>
+  </div>
+
+  <pre id="log" class="log"></pre>
+
+  <div id="error-box" class="error-box hidden"></div>
+
+  <div id="summary" class="summary hidden">
+    <h2>Result</h2>
+    <div class="metrics">
+      <div class="metric"><span class="big" id="m-score">—</span><span class="cap">Secure Score</span></div>
+      <div class="metric"><span class="big" id="m-total">—</span><span class="cap">Findings</span></div>
+      <div class="metric high"><span class="big" id="m-high">—</span><span class="cap">High</span></div>
+      <div class="metric med"><span class="big" id="m-med">—</span><span class="cap">Medium</span></div>
+      <div class="metric low"><span class="big" id="m-low">—</span><span class="cap">Low</span></div>
+    </div>
+
+    <div class="actions">
+      <a id="view-report" class="btn primary" target="_blank" rel="noopener">View HTML report</a>
+      <a id="dl-html" class="btn">Download HTML</a>
+      <a id="dl-json" class="btn">Download JSON</a>
+      <a id="dl-csv" class="btn">Download CSV</a>
+      <a id="dl-ai" class="btn hidden">Download AI analysis</a>
+    </div>
+
+    <div id="ai-block" class="ai-block hidden">
+      <h2>AI analysis <span class="muted" id="ai-task-label"></span></h2>
+      <pre id="ai-content" class="ai-content"></pre>
+    </div>
+    <p id="ai-note" class="hint hidden"></p>
+  </div>
+
+  <p><a href="{{ url_for('index') }}">&larr; Run another assessment</a></p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const jobId = document.querySelector('[data-job-id]').dataset.jobId;
+  const pill = document.getElementById('status-pill');
+  const bar = document.getElementById('bar');
+  const log = document.getElementById('log');
+  const errorBox = document.getElementById('error-box');
+  const summary = document.getElementById('summary');
+
+  const STAGE = { queued: 5, authenticating: 25, assessing: 60, ai: 85, done: 100, error: 100 };
+  const TERMINAL = new Set(['done', 'error']);
+
+  function setStatus(s) {
+    pill.textContent = s;
+    pill.className = 'pill ' + (s === 'done' ? 'ok' : s === 'error' ? 'bad' : 'running');
+    bar.style.width = (STAGE[s] || 5) + '%';
+    if (s === 'error') bar.classList.add('bar-error');
+  }
+
+  function fillSummary(data) {
+    const s = data.summary || {};
+    const c = s.counts || {};
+    document.getElementById('m-score').textContent =
+      (s.percentage === null || s.percentage === undefined) ? 'N/A' : s.percentage + '%';
+    document.getElementById('m-total').textContent = s.total ?? 0;
+    document.getElementById('m-high').textContent = c.High ?? 0;
+    document.getElementById('m-med').textContent = c.Medium ?? 0;
+    document.getElementById('m-low').textContent = c.Low ?? 0;
+
+    document.getElementById('view-report').href = '/report/' + jobId;
+    document.getElementById('dl-html').href = '/download/' + jobId + '/html';
+    document.getElementById('dl-json').href = '/download/' + jobId + '/json';
+    document.getElementById('dl-csv').href = '/download/' + jobId + '/csv';
+
+    if (data.ai_content) {
+      document.getElementById('ai-block').classList.remove('hidden');
+      document.getElementById('ai-content').textContent = data.ai_content;
+      document.getElementById('ai-task-label').textContent = '(' + (data.ai_task || '') + ')';
+      const dlAi = document.getElementById('dl-ai');
+      dlAi.href = '/download/' + jobId + '/ai';
+      dlAi.classList.remove('hidden');
+    } else if (data.ai_task && data.ai_configured === false) {
+      const note = document.getElementById('ai-note');
+      note.textContent = 'AI was requested but no provider is configured. Set MDC_AI_* env vars (see .env.example) and re-run.';
+      note.classList.remove('hidden');
+    }
+    summary.classList.remove('hidden');
+  }
+
+  async function poll() {
+    let data;
+    try {
+      const r = await fetch('/api/status/' + jobId, { cache: 'no-store' });
+      if (!r.ok) throw new Error('status ' + r.status);
+      data = await r.json();
+    } catch (e) {
+      log.textContent += '\n[ui] polling error: ' + e.message;
+      setTimeout(poll, 2000);
+      return;
+    }
+
+    setStatus(data.status);
+    log.textContent = (data.messages || []).join('\n');
+    log.scrollTop = log.scrollHeight;
+
+    if (data.status === 'error') {
+      errorBox.textContent = data.error || 'Assessment failed.';
+      errorBox.classList.remove('hidden');
+      return;
+    }
+    if (data.status === 'done') {
+      fillSummary(data);
+      return;
+    }
+    setTimeout(poll, 1500);
+  }
+
+  poll();
+})();
+</script>
+{% endblock %}
