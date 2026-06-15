@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Run an assessment{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Run an assessment</h1>
+  <p class="muted">
+    Audit a Microsoft Defender for Cloud subscription, map findings to a compliance
+    framework, and optionally run AI analysis. A browser window may open on this
+    machine to sign in to Azure.
+  </p>
+
+  <form method="post" action="{{ url_for('run') }}" class="form">
+    <label class="field">
+      <span class="label">Subscription ID</span>
+      <input type="text" name="subscription_id"
+             placeholder="Leave blank to auto-select (single subscription)"
+             pattern="[0-9a-fA-F-]*"
+             autocomplete="off">
+      <span class="hint">Optional. If your account has multiple subscriptions, enter one here.</span>
+    </label>
+
+    <label class="field">
+      <span class="label">Compliance framework</span>
+      <select name="framework">
+        {% for fw in frameworks %}
+        <option value="{{ fw }}" {% if fw == 'cis' %}selected{% endif %}>
+          {% if fw == 'cis' %}CIS Azure Foundations Benchmark v2.0.0
+          {% elif fw == 'nist' %}NIST Cybersecurity Framework (CSF) 2.0
+          {% else %}None (unmapped){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="field">
+      <span class="label">AI analysis <span class="muted">(optional)</span></span>
+      <select name="ai_task">
+        <option value="" selected>Off</option>
+        <option value="explain">Explain findings</option>
+        <option value="prioritize">Prioritize remediation</option>
+        <option value="guidance">Remediation guidance</option>
+        <option value="review">Review loop (High findings)</option>
+      </select>
+      <span class="hint">
+        Requires your own API key via <code>MDC_AI_*</code> environment variables
+        (see <code>.env.example</code>). Skipped gracefully if not configured.
+      </span>
+    </label>
+
+    <button type="submit" class="btn primary">Start assessment</button>
+  </form>
+</section>
+
+<section class="card subtle">
+  <h2>Before you run</h2>
+  <ul class="checklist">
+    <li>You are signed in to an account with <strong>Reader</strong> (or higher) on the subscription.</li>
+    <li>This server runs on your own machine — sign-in opens a local browser window.</li>
+    <li>AI is optional. To enable it, copy <code>.env.example</code> to <code>.env</code> and add your key.</li>
+  </ul>
+</section>
+{% endblock %}

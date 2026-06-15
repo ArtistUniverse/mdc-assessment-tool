@@ -47,7 +47,7 @@ def suppress_stderr():
 from azure.identity import InteractiveBrowserCredential, TokenCachePersistenceOptions
 from azure.mgmt.security import SecurityCenter
 from azure.mgmt.subscription import SubscriptionClient
-from cis_mapping import enrich_recommendations, get_section_summary
+from frameworks import get_framework, SUPPORTED_FRAMEWORKS
 from report_generator import generate_html_report, generate_csv_report
 
 
@@ -179,13 +179,14 @@ def assess_secure_score(client):
     return score_data
 
 
-def assess_recommendations(client, limit=20):
+def assess_recommendations(client, framework, limit=20):
     """
     Retrieve active security recommendations, sorted by severity.
     Severity is not hydrated on individual assessment objects from the list API —
     it lives in the assessments_metadata definitions. We build a lookup dict first,
     then join it to each unhealthy assessment by name.
     Deduplicates by recommendation name and counts affected resources.
+    Enriched and grouped using the supplied compliance framework adapter.
     """
     print("Checking recommendations...")
 
@@ -263,8 +264,8 @@ def assess_recommendations(client, limit=20):
     ]
     recs.sort(key=lambda r: (severity_order.get(r["severity"], 99), r["name"]))
 
-    # Enrich with CIS Azure Foundations Benchmark mapping
-    recs = enrich_recommendations(recs)
+    # Enrich with the selected compliance framework mapping
+    recs = framework.enrich_recommendations(recs)
 
     counts = {"High": 0, "Medium": 0, "Low": 0}
     for r in recs:
@@ -276,7 +277,7 @@ def assess_recommendations(client, limit=20):
         "total": len(recs),
         "counts": counts,
         "top_recommendations": recs[:limit],
-        "by_cis_section": get_section_summary(recs)
+        "by_cis_section": framework.get_section_summary(recs)
     }
 
 
@@ -420,27 +421,46 @@ def print_report(subscription_id, plans, score, recommendations, contacts, auto_
     print("=" * 60 + "\n")
 
 
-def save_report(subscription_id, plans, score, recommendations, contacts, auto_prov):
-    """Save the full report as a JSON file for use in client deliverables."""
+def save_report(report_data, path="mdc_report.json"):
+    """Save the full report dict as a JSON file for use in client deliverables."""
+    with open(path, "w") as f:
+        json.dump(report_data, f, indent=2)
+    return report_data
 
-    report = {
+
+# ── Assessment orchestration ───────────────────────────────────────────────────
+
+def run_assessment(client, subscription_id, framework_name="cis"):
+    """
+    Run every assessment section against an authenticated SecurityCenter client
+    and return the assembled report dict. Does no printing or file I/O, so it can
+    be reused by the deployment validator (Issue 11) and the web UI (Issue 14).
+    """
+    framework = get_framework(framework_name)
+
+    plans     = assess_defender_plans(client)
+    score     = assess_secure_score(client)
+    recs      = assess_recommendations(client, framework)
+    contacts  = assess_security_contacts(client)
+    auto_prov = assess_auto_provisioning(client)
+
+    return {
         "report_metadata": {
             "subscription_id": subscription_id,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "tool": "mdc_assess.py"
+            "tool": "mdc_assess.py",
+            "framework": {
+                "name": framework.name,
+                "label": framework.label,
+                "control_label": framework.control_label,
+            },
         },
         "secure_score": score,
         "defender_plans": plans,
-        "recommendations": recommendations,
+        "recommendations": recs,
         "security_contacts": contacts,
         "auto_provisioning": auto_prov,
     }
-
-    path = "mdc_report.json"
-    with open(path, "w") as f:
-        json.dump(report, f, indent=2)
-
-    return report
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -453,6 +473,20 @@ def main():
         choices=["json", "html", "csv", "all"],
         default="all",
         help="Output format(s) to generate (default: all)",
+    )
+    parser.add_argument(
+        "--framework",
+        choices=list(SUPPORTED_FRAMEWORKS),
+        default="cis",
+        help="Compliance framework to map findings against (default: cis)",
+    )
+    parser.add_argument(
+        "--ai",
+        nargs="?",
+        const="explain",
+        choices=["explain", "prioritize", "guidance", "review"],
+        help="Run optional AI analysis after the assessment (bring-your-own-API; "
+             "defaults to 'explain'). Requires MDC_AI_* env vars — see .env.example.",
     )
     args = parser.parse_args()
 
@@ -471,24 +505,39 @@ def main():
     # The SecurityCenter client is the main Azure SDK client for MDC
     client = SecurityCenter(credential, subscription_id)
 
-    print(f"[INFO] Assessing subscription: {subscription_id}\n")
+    print(f"[INFO] Assessing subscription: {subscription_id}")
+    print(f"[INFO] Framework: {get_framework(args.framework).label}\n")
 
     # Run all assessment sections
-    plans       = assess_defender_plans(client)
-    score       = assess_secure_score(client)
-    recs        = assess_recommendations(client)
-    contacts    = assess_security_contacts(client)
-    auto_prov   = assess_auto_provisioning(client)
+    report_data = run_assessment(client, subscription_id, args.framework)
 
     # Output
-    print_report(subscription_id, plans, score, recs, contacts, auto_prov)
-    report_data = save_report(subscription_id, plans, score, recs, contacts, auto_prov)
+    print_report(
+        subscription_id,
+        report_data["defender_plans"],
+        report_data["secure_score"],
+        report_data["recommendations"],
+        report_data["security_contacts"],
+        report_data["auto_provisioning"],
+    )
+    save_report(report_data)
 
     fmt = args.output_format
     if fmt in ("html", "all"):
         generate_html_report(report_data)
     if fmt in ("csv", "all"):
         generate_csv_report(report_data)
+
+    # Optional AI analysis (Issue 12) — bring-your-own-API, fully optional.
+    if args.ai:
+        try:
+            from ai_agent import run_task, AIError
+            try:
+                run_task(report_data, args.ai)
+            except AIError as e:
+                print(f"[AI] [ERROR] {e}")
+        except ImportError as e:
+            print(f"[AI] [WARN] AI module unavailable: {e}")
 
 
 if __name__ == "__main__":
