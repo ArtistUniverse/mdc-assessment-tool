@@ -4,6 +4,12 @@ azure-mgmt-security>=3.0.0
 azure-mgmt-subscription>=3.1.1
 azure-cli-core>=2.50.0
 
+# Deployment extras (optional)
+#   --activity-alerts needs monitor + resource; the RBAC preflight needs authorization
+azure-mgmt-monitor>=6.0.0
+azure-mgmt-resource>=23.0.0
+azure-mgmt-authorization>=4.0.0
+
 # Web UI (optional — only needed for app.py)
 flask>=3.0.0
 

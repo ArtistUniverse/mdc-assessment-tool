@@ -154,9 +154,13 @@ baseline gaps it finds:
 - **Defender plans** — enables Standard tier (prioritizing Arm, Storage Accounts, Key Vaults)
 - **Security contact** — configures the alert notification contact
 - **Auto-provisioning** — turns on automatic agent deployment
+- **Activity log alerts** *(opt-in)* — alerts on critical control-plane operations (NSGs, SQL firewall rules, policy assignments, security solutions)
 
 It is **safe by default**: nothing is changed without an explicit confirmation, and
-every change is recorded to `mdc_deployment_log.json`.
+every change is recorded to `mdc_deployment_log.json`. Before applying anything it
+runs a best-effort **RBAC preflight** to confirm the signed-in account has write
+access (Owner/Contributor) — group- or PIM-based grants may not be detectable, so
+the check warns rather than hard-blocking. Use `--skip-permission-check` to bypass it.
 
 ```bash
 # 1) Preview only — writes mdc_deployment_plan.json, makes NO changes
@@ -168,9 +172,18 @@ python mdc_deploy.py --contact-email security@example.com
 # Limit to specific Defender plans
 python mdc_deploy.py --plans Arm StorageAccounts KeyVaults --contact-email security@example.com
 
+# Also create activity log alerts (requires a resource group to hold them)
+python mdc_deploy.py --contact-email security@example.com \
+    --activity-alerts --alert-resource-group mdc-monitoring
+
 # Skip the prompt in automation
 python mdc_deploy.py --contact-email security@example.com --yes
 ```
+
+> Activity log alerts and the RBAC preflight need extra packages:
+> `pip install azure-mgmt-monitor azure-mgmt-resource azure-mgmt-authorization`.
+> The resource group named by `--alert-resource-group` is created if missing
+> (region set by `--alert-location`, default `eastus`).
 
 ### Validate after deploying
 

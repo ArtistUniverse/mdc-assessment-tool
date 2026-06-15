@@ -9,12 +9,19 @@ the gaps it found in an Azure subscription:
     (prioritising Arm / StorageAccounts / KeyVaults)
   - Configures a security contact if none is set
   - Enables auto-provisioning of monitoring components
+  - Optionally creates activity log alerts for critical control-plane
+    operations (opt-in via --activity-alerts)
+
+Before applying changes it runs a best-effort RBAC preflight to confirm the
+signed-in account has write access (Owner / Contributor) to the subscription.
 
 Every change requires explicit confirmation. All changes are logged with
 before/after values to mdc_deployment_log.json.
 
 Requirements:
     pip install azure-identity azure-mgmt-security azure-mgmt-subscription
+    # optional, only for --activity-alerts and the RBAC preflight:
+    pip install azure-mgmt-monitor azure-mgmt-resource azure-mgmt-authorization
 
 Authentication:
     Uses InteractiveBrowserCredential (same as mdc_assess.py). A browser window
@@ -38,6 +45,24 @@ from datetime import datetime, timezone
 
 # Defender plans to remediate first, per Issue 9.
 PRIORITY_PLANS = ["Arm", "StorageAccounts", "KeyVaults"]
+
+# Activity log alerts for critical control-plane operations (CIS 5.2.x).
+# Each tuple is (alert name, the Administrative operationName to alert on).
+ACTIVITY_LOG_ALERTS = [
+    ("CreatePolicyAssignment",       "Microsoft.Authorization/policyAssignments/write"),
+    ("DeletePolicyAssignment",       "Microsoft.Authorization/policyAssignments/delete"),
+    ("CreateUpdateNSG",              "Microsoft.Network/networkSecurityGroups/write"),
+    ("DeleteNSG",                    "Microsoft.Network/networkSecurityGroups/delete"),
+    ("CreateUpdateNSGRule",          "Microsoft.Network/networkSecurityGroups/securityRules/write"),
+    ("DeleteNSGRule",                "Microsoft.Network/networkSecurityGroups/securityRules/delete"),
+    ("CreateUpdateSecuritySolution", "Microsoft.Security/securitySolutions/write"),
+    ("DeleteSecuritySolution",       "Microsoft.Security/securitySolutions/delete"),
+    ("CreateUpdateSQLFirewallRule",  "Microsoft.Sql/servers/firewallRules/write"),
+    ("DeleteSQLFirewallRule",        "Microsoft.Sql/servers/firewallRules/delete"),
+]
+
+# Built-in roles that grant the write access deployment needs.
+WRITE_ROLES = {"Owner", "Contributor"}
 
 
 # ── Plan building (pure — no Azure calls, safe to unit test) ────────────────────
@@ -65,7 +90,8 @@ def _plan_priority(name):
 
 
 def build_action_plan(report, contact_email=None, contact_phone=None,
-                      enable_auto_provisioning=True, plans=None):
+                      enable_auto_provisioning=True, plans=None,
+                      enable_activity_alerts=False, alert_resource_group=None):
     """
     Derive an ordered list of remediation actions from an assessment report.
 
@@ -80,6 +106,9 @@ def build_action_plan(report, contact_email=None, contact_phone=None,
         enable_auto_provisioning: whether to include auto-provisioning actions
         plans: optional explicit list of plan names to enable; if None, every
                disabled plan found in the report is included.
+        enable_activity_alerts: whether to add activity-log-alert actions
+        alert_resource_group: resource group to hold the activity log alerts
+               (required when enable_activity_alerts is True).
     """
     actions = []
 
@@ -139,6 +168,35 @@ def build_action_plan(report, contact_email=None, contact_phone=None,
                 "expected": "On",
             })
 
+    # 4 — Activity log alerts for critical control-plane operations (opt-in).
+    # The assessment does not collect existing alerts, so this is gated behind an
+    # explicit flag to avoid proposing alerts that may already exist.
+    if enable_activity_alerts:
+        if alert_resource_group:
+            for alert_name, operation in ACTIVITY_LOG_ALERTS:
+                actions.append({
+                    "category": "activity_log_alert",
+                    "target": alert_name,
+                    "description": f"Create activity log alert: {alert_name}",
+                    "current": "Not configured",
+                    "expected": f"Alert on {operation}",
+                    "params": {
+                        "alert_name": alert_name,
+                        "operation_name": operation,
+                        "resource_group": alert_resource_group,
+                    },
+                })
+        else:
+            actions.append({
+                "category": "activity_log_alert",
+                "target": "all",
+                "description": "Create activity log alerts (SKIPPED — no --alert-resource-group supplied)",
+                "current": "Not configured",
+                "expected": "Activity log alerts configured",
+                "skip": True,
+                "skip_reason": "Provide --alert-resource-group to enable activity log alerts.",
+            })
+
     return actions
 
 
@@ -183,6 +241,77 @@ def confirm(prompt="Proceed with deployment?"):
     except EOFError:
         return False
     return answer in ("yes", "y")
+
+
+# ── Permission preflight (best-effort RBAC check) ───────────────────────────────
+
+def _decode_principal_oid(credential):
+    """Extract the signed-in principal's object id from the ARM access token.
+
+    The access token is a JWT; its payload carries the principal's object id in
+    the `oid` claim (or `sub` for some identities). No network call is needed.
+    """
+    import base64
+    token = credential.get_token("https://management.azure.com/.default").token
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)  # restore base64 padding
+    claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    return claims.get("oid") or claims.get("sub")
+
+
+def _role_grants_write(role_definition):
+    """True if a role definition includes the broad write actions we care about."""
+    try:
+        for perm in role_definition.permissions or []:
+            actions = [a.lower() for a in (perm.actions or [])]
+            not_actions = [a.lower() for a in (getattr(perm, "not_actions", None) or [])]
+            for a in actions:
+                if a in ("*", "*/write", "microsoft.security/*") and a not in not_actions:
+                    return True
+    except Exception:  # noqa: BLE001 — treat any parsing issue as "no write"
+        return False
+    return False
+
+
+def check_write_permission(credential, subscription_id):
+    """
+    Best-effort preflight: does the signed-in principal have write access to the
+    subscription? Returns (status, roles, detail) where status is one of
+    'ok' | 'insufficient' | 'unknown'.
+
+    Group- or PIM-based grants are not visible through a direct principal filter,
+    so an 'insufficient' result is advisory only — never a hard block.
+    """
+    try:
+        from azure.mgmt.authorization import AuthorizationManagementClient
+    except ImportError:
+        return ("unknown", [], "azure-mgmt-authorization not installed")
+    try:
+        oid = _decode_principal_oid(credential)
+    except Exception as e:  # noqa: BLE001
+        return ("unknown", [], f"could not read token claims: {e}")
+    if not oid:
+        return ("unknown", [], "principal id not present in token")
+    try:
+        auth = AuthorizationManagementClient(credential, subscription_id)
+        scope = f"/subscriptions/{subscription_id}"
+        assignments = list(auth.role_assignments.list_for_scope(
+            scope, filter=f"principalId eq '{oid}'"))
+        roles, privileged = [], False
+        for a in assignments:
+            try:
+                rd = auth.role_definitions.get_by_id(a.role_definition_id)
+            except Exception:  # noqa: BLE001
+                continue
+            name = getattr(rd, "role_name", None) or "Unknown"
+            roles.append(name)
+            if name in WRITE_ROLES or _role_grants_write(rd):
+                privileged = True
+        if privileged:
+            return ("ok", sorted(set(roles)), None)
+        return ("insufficient", sorted(set(roles)), None)
+    except Exception as e:  # noqa: BLE001
+        return ("unknown", [], str(e))
 
 
 # ── Execution (Azure SDK calls) ─────────────────────────────────────────────────
@@ -233,7 +362,60 @@ def _enable_auto_provisioning(client, name):
             setting_name=name, auto_provisioning_setting=setting)
 
 
-def execute_action(client, scope, action):
+def _import_monitor_models():
+    """Resolve activity-log-alert model classes across azure-mgmt-monitor versions."""
+    from azure.mgmt.monitor import models as m
+    alert = getattr(m, "ActivityLogAlertResource", None)
+    all_of = (getattr(m, "AlertRuleAllOfCondition", None)
+              or getattr(m, "ActivityLogAlertAllOfCondition", None))
+    leaf = (getattr(m, "AlertRuleAnyOfOrLeafCondition", None)
+            or getattr(m, "AlertRuleLeafCondition", None)
+            or getattr(m, "ActivityLogAlertLeafCondition", None))
+    action_list = (getattr(m, "ActionList", None)
+                   or getattr(m, "ActivityLogAlertActionList", None))
+    if not all([alert, all_of, leaf, action_list]):
+        raise RuntimeError("Unsupported azure-mgmt-monitor version (alert models not found)")
+    return {"Alert": alert, "AllOf": all_of, "Leaf": leaf, "ActionList": action_list}
+
+
+def _ensure_resource_group(credential, subscription_id, name, location):
+    """Create the resource group that will hold the activity log alerts if needed."""
+    from azure.mgmt.resource import ResourceManagementClient
+    rm = ResourceManagementClient(credential, subscription_id)
+    try:
+        exists = rm.resource_groups.check_existence(name)
+    except Exception:  # noqa: BLE001
+        exists = False
+    if not exists:
+        rm.resource_groups.create_or_update(name, {"location": location})
+
+
+def _create_activity_log_alert(monitor_client, scope, params):
+    """Create/replace an activity log alert for one Administrative operation."""
+    rg = params["resource_group"]
+    operation = params["operation_name"]
+    alert_name = params.get("alert_name") or operation.replace("/", "-")
+    models = _import_monitor_models()
+    condition = models["AllOf"](all_of=[
+        models["Leaf"](field="category", equals="Administrative"),
+        models["Leaf"](field="operationName", equals=operation),
+    ])
+    alert = models["Alert"](
+        location="Global",
+        scopes=[scope],
+        enabled=True,
+        condition=condition,
+        actions=models["ActionList"](action_groups=[]),
+    )
+    try:
+        return monitor_client.activity_log_alerts.create_or_update(rg, alert_name, alert)
+    except TypeError:
+        return monitor_client.activity_log_alerts.create_or_update(
+            resource_group_name=rg, activity_log_alert_name=alert_name,
+            activity_log_alert_rule=alert)
+
+
+def execute_action(client, scope, action, monitor_client=None):
     """
     Apply a single action against Azure. Returns a result dict with before/after
     values and a status. Never raises — failures are captured in the result.
@@ -255,6 +437,10 @@ def execute_action(client, scope, action):
             _configure_security_contact(client, action.get("params", {}))
         elif cat == "auto_provisioning":
             _enable_auto_provisioning(client, action["target"])
+        elif cat == "activity_log_alert":
+            if monitor_client is None:
+                raise RuntimeError("Monitor client unavailable for activity log alert")
+            _create_activity_log_alert(monitor_client, scope, action.get("params", {}))
         else:
             result["status"] = "skipped"
             result["error"] = f"Unknown action category: {cat}"
@@ -413,6 +599,14 @@ def main():
                         help="Limit Defender plan enablement to these plan names")
     parser.add_argument("--no-auto-provisioning", action="store_true",
                         help="Do not enable auto-provisioning")
+    parser.add_argument("--activity-alerts", action="store_true",
+                        help="Also create activity log alerts for critical control-plane operations")
+    parser.add_argument("--alert-resource-group",
+                        help="Resource group to hold the activity log alerts (required with --activity-alerts)")
+    parser.add_argument("--alert-location", default="eastus",
+                        help="Location for the activity-log-alert resource group (default: eastus)")
+    parser.add_argument("--skip-permission-check", action="store_true",
+                        help="Skip the upfront write-access (RBAC) preflight check")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview changes and write mdc_deployment_plan.json; make no changes")
     parser.add_argument("--validate", action="store_true",
@@ -434,6 +628,8 @@ def main():
         contact_phone=args.contact_phone,
         enable_auto_provisioning=not args.no_auto_provisioning,
         plans=args.plans,
+        enable_activity_alerts=args.activity_alerts,
+        alert_resource_group=args.alert_resource_group,
     )
 
     active = print_plan(actions)
@@ -472,11 +668,46 @@ def main():
     client = SecurityCenter(credential, subscription_id)
     scope = f"/subscriptions/{subscription_id}"
 
+    # Upfront RBAC preflight (best-effort; group/PIM grants may not be visible).
+    if not args.skip_permission_check:
+        status, roles, detail = check_write_permission(credential, subscription_id)
+        if status == "ok":
+            print(f"[INFO] Permission check passed (roles: {', '.join(roles) or 'n/a'}).\n")
+        elif status == "insufficient":
+            print("[WARN] The signed-in account does not appear to have write access "
+                  "(Owner/Contributor) on this subscription.")
+            print(f"       Detected roles: {', '.join(roles) or 'none'}")
+            print("       Group- or PIM-based access may not be detectable; deployment may fail.\n")
+            if not args.yes and not confirm("Continue without confirmed write access?"):
+                print("[INFO] Deployment cancelled.")
+                return
+        else:
+            print(f"[INFO] Could not verify permissions ({detail}). Proceeding.\n")
+
+    # Prepare the Monitor client + resource group if activity log alerts are queued.
+    monitor_client = None
+    alert_actions = [a for a in active if a["category"] == "activity_log_alert"]
+    if alert_actions:
+        try:
+            from azure.mgmt.monitor import MonitorManagementClient
+        except ImportError as e:
+            print(f"[ERROR] azure-mgmt-monitor not installed: {e}")
+            print("        pip install azure-mgmt-monitor azure-mgmt-resource")
+            sys.exit(1)
+        monitor_client = MonitorManagementClient(credential, subscription_id)
+        rg = alert_actions[0]["params"]["resource_group"]
+        try:
+            _ensure_resource_group(credential, subscription_id, rg, args.alert_location)
+            print(f"[INFO] Using resource group '{rg}' for activity log alerts.")
+        except Exception as e:  # noqa: BLE001
+            print(f"[ERROR] Could not ensure resource group '{rg}': {e}")
+            sys.exit(1)
+
     print(f"[INFO] Deploying baseline to subscription: {subscription_id}\n")
     results = []
     for i, action in enumerate(active, 1):
         print(f"  [{i}/{len(active)}] {action['description']} ...", end=" ")
-        result = execute_action(client, scope, action)
+        result = execute_action(client, scope, action, monitor_client=monitor_client)
         results.append(result)
         if result["status"] == "applied":
             print("done")
